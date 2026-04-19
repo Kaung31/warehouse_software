@@ -11,7 +11,7 @@ const PriorityEnum  = z.enum(['LOW', 'NORMAL', 'HIGH', 'URGENT'])
 const PaymentStatusEnum = z.enum(['PAID', 'UNPAID', 'DISPUTED', 'WARRANTY_APPROVED'])
 const QCResultEnum  = z.enum(['PASS', 'FAIL', 'NA'])
 
-// POST /api/cases/intake
+// POST /api/cases/intake  (Stage 1 — CS creates the case folder)
 export const intakeSchema = z.object({
   serialNumber:     z.string().min(1).max(50),
   brand:            z.string().min(1).max(100),
@@ -21,10 +21,10 @@ export const intakeSchema = z.object({
   customerName:     z.string().min(1).max(100).optional(),
   customerPostcode: z.string().regex(/^[A-Z]{1,2}\d[A-Z\d]? ?\d[A-Z]{2}$/i).optional(),
   customerPhone:    z.string().max(20).optional(),
+  customerEmail:    z.string().email().optional(),
   // Invoice (required for WARRANTY)
   invoiceNumber:    z.string().max(100).optional(),
-  // Error codes + fault
-  errorCodes:       z.array(ErrorCodeEnum).min(1),
+  // Customer complaint — error codes NOT collected here (Inbound does that)
   faultDescription: z.string().min(3).max(2000),
   internalNotes:    z.string().max(1000).optional(),
   priority:         PriorityEnum.default('NORMAL'),
@@ -37,6 +37,13 @@ export const intakeSchema = z.object({
     if (!d.invoiceNumber)
       ctx.addIssue({ code: 'custom', path: ['invoiceNumber'],    message: 'Required for warranty cases' })
   }
+})
+
+// POST /api/cases/[id]/inbound-triage  (Stage 2 — Inbound scans arrival, adds diagnosis)
+export const inboundTriageSchema = z.object({
+  errorCodes:  z.array(ErrorCodeEnum).min(1, 'Select at least one error code'),
+  diagnosis:   z.string().min(3).max(2000),
+  internalNotes: z.string().max(1000).optional(),
 })
 
 // POST /api/cases/[id]/cs-update
@@ -66,7 +73,8 @@ export const completeRepairSchema = z.object({
   repairNotes: z.string().max(2000).optional(),
 })
 
-export type IntakeInput         = z.infer<typeof intakeSchema>
-export type CSUpdateInput       = z.infer<typeof csUpdateSchema>
-export type QCSubmitInput       = z.infer<typeof qcSubmitSchema>
-export type CompleteRepairInput = z.infer<typeof completeRepairSchema>
+export type IntakeInput          = z.infer<typeof intakeSchema>
+export type InboundTriageInput   = z.infer<typeof inboundTriageSchema>
+export type CSUpdateInput        = z.infer<typeof csUpdateSchema>
+export type QCSubmitInput        = z.infer<typeof qcSubmitSchema>
+export type CompleteRepairInput  = z.infer<typeof completeRepairSchema>

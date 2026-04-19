@@ -32,12 +32,13 @@ export const PERMISSIONS = {
   'pricing:view': [Role.ADMIN, Role.MANAGER],
 
   // New workflow permissions
-  'case:intake':         [Role.ADMIN, Role.MANAGER, Role.WAREHOUSE, Role.CS],
-  'case:view':           [Role.ADMIN, Role.MANAGER, Role.MECHANIC, Role.CS, Role.WAREHOUSE],
-  'case:cs_update':      [Role.ADMIN, Role.MANAGER, Role.CS],
-  'case:start_repair':   [Role.ADMIN, Role.MANAGER, Role.MECHANIC],
-  'case:qc_submit':      [Role.ADMIN, Role.MANAGER, Role.WAREHOUSE],
-  'case:dispatch':       [Role.ADMIN, Role.MANAGER, Role.WAREHOUSE],
+  'case:intake':          [Role.ADMIN, Role.MANAGER, Role.CS],
+  'case:inbound_triage':  [Role.ADMIN, Role.MANAGER, Role.WAREHOUSE],
+  'case:view':            [Role.ADMIN, Role.MANAGER, Role.MECHANIC, Role.CS, Role.WAREHOUSE],
+  'case:cs_update':       [Role.ADMIN, Role.MANAGER, Role.CS],
+  'case:start_repair':    [Role.ADMIN, Role.MANAGER, Role.MECHANIC],
+  'case:qc_submit':       [Role.ADMIN, Role.MANAGER, Role.WAREHOUSE],
+  'case:dispatch':        [Role.ADMIN, Role.MANAGER, Role.WAREHOUSE],
 } satisfies Record<string, Role[]>
 
 export type Permission = keyof typeof PERMISSIONS

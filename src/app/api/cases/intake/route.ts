@@ -27,6 +27,7 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
           name:     data.customerName,
           postcode: data.customerPostcode.toUpperCase().trim(),
           phone:    data.customerPhone,
+          email:    data.customerEmail,
         },
       })
     }
@@ -34,7 +35,9 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
   }
 
   const orderNumber   = await generateOrderNumber()
-  const initialStatus = data.caseType === 'WARRANTY' ? 'AWAITING_CS' : 'BGRADE_RECORDED'
+  // WARRANTY cases start at AWAITING_INBOUND — CS creates the folder,
+  // Inbound triages when the scooter physically arrives → then AWAITING_CS for payment gate.
+  const initialStatus = data.caseType === 'WARRANTY' ? 'AWAITING_INBOUND' : 'BGRADE_RECORDED'
 
   const caseRecord = await prisma.$transaction(async (tx) => {
     // Create scooter if new
@@ -70,20 +73,12 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
         faultDescription: data.faultDescription,
         internalNotes:    data.internalNotes,
         priority:         data.priority as 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT',
-        status:           initialStatus as 'AWAITING_CS' | 'BGRADE_RECORDED',
+        status:           initialStatus as 'AWAITING_INBOUND' | 'BGRADE_RECORDED',
         caseType:         data.caseType as 'WARRANTY' | 'BGRADE',
       },
     })
 
-    // Error codes
-    await tx.errorCodeReport.createMany({
-      data: data.errorCodes.map((code) => ({
-        caseId:    newCase.id,
-        errorCode: code as 'E01',  // cast; runtime value is correct
-      })),
-    })
-
-    // Invoice reference (always create one)
+    // Invoice reference (always create one — error codes added by Inbound later)
     await tx.invoiceReference.create({
       data: {
         caseId:        newCase.id,
@@ -96,11 +91,11 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
     // Initial status history entry
     await tx.caseStatusHistory.create({
       data: {
-        caseId:     newCase.id,
-        fromStatus: null,
-        toStatus:   initialStatus,
+        caseId:      newCase.id,
+        fromStatus:  null,
+        toStatus:    initialStatus,
         changedById: user.id,
-        reason:     'Case created via intake',
+        reason:      'CS created case — awaiting physical scooter arrival',
       },
     })
 

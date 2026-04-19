@@ -11,6 +11,7 @@ const repairMap: Record<string, string> = {
   DISPATCHED:           'badge-dispatched',
   CANCELLED:            'badge-cancelled',
   // New workflow
+  AWAITING_INBOUND:     'badge-awaiting',
   AWAITING_CS:          'badge-awaiting-cs',
   WAITING_FOR_MECHANIC: 'badge-waiting-mech',
   DISPUTED:             'badge-disputed',
@@ -56,6 +57,7 @@ const paymentMap: Record<string, string> = {
 }
 
 const LABELS: Record<string, string> = {
+  AWAITING_INBOUND:     'Awaiting Inbound',
   AWAITING_CS:          'Awaiting CS',
   WAITING_FOR_MECHANIC: 'Waiting for Mechanic',
   BGRADE_RECORDED:      'B-Grade',

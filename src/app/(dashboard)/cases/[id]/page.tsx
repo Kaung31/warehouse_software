@@ -8,6 +8,7 @@ import Btn from '@/components/ui/Btn'
 import StatusBadge from '@/components/ui/StatusBadge'
 import StatusTimeline from '@/components/cases/StatusTimeline'
 import CommentsThread from '@/components/cases/CommentsThread'
+import InboundPanel from '@/components/cases/InboundPanel'
 import CSActionPanel from '@/components/cases/CSActionPanel'
 import MechanicPanel from '@/components/cases/MechanicPanel'
 import DispatchPanel from '@/components/cases/DispatchPanel'
@@ -67,17 +68,23 @@ export default async function CaseDetailPage({
     orderBy: { stepNumber: 'asc' },
   })
 
-  const userRole    = user!.role
-  const canCS       = ['ADMIN', 'MANAGER', 'CS'].includes(userRole)
-  const canMechanic = ['ADMIN', 'MANAGER', 'MECHANIC'].includes(userRole)
-  const canQC       = ['ADMIN', 'MANAGER', 'WAREHOUSE'].includes(userRole)
-  const canDispatch = ['ADMIN', 'MANAGER', 'WAREHOUSE'].includes(userRole)
-  const canComment  = ['ADMIN', 'MANAGER', 'CS', 'MECHANIC', 'WAREHOUSE'].includes(userRole)
+  const userRole     = user!.role
+  const canInbound   = ['ADMIN', 'MANAGER', 'WAREHOUSE'].includes(userRole)
+  const canCS        = ['ADMIN', 'MANAGER', 'CS'].includes(userRole)
+  const canMechanic  = ['ADMIN', 'MANAGER', 'MECHANIC'].includes(userRole)
+  const canQC        = ['ADMIN', 'MANAGER', 'WAREHOUSE'].includes(userRole)
+  const canDispatch  = ['ADMIN', 'MANAGER', 'WAREHOUSE'].includes(userRole)
+  const canComment   = ['ADMIN', 'MANAGER', 'CS', 'MECHANIC', 'WAREHOUSE'].includes(userRole)
 
   const status   = rep.status
   const latestQC = rep.qcSubmissions[0] ?? null
 
   function ActionPanel() {
+    if (status === 'AWAITING_INBOUND') {
+      if (!canInbound) return <RoleGate />
+      return <InboundPanel caseId={id} />
+    }
+
     if (status === 'AWAITING_CS' || status === 'DISPUTED') {
       if (!canCS) return <RoleGate />
       return (
@@ -262,7 +269,14 @@ export default async function CaseDetailPage({
         <div>
           <div className="card" style={{ padding: '20px 24px' }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 16 }}>
-              Action required
+              {status === 'AWAITING_INBOUND'    ? 'Stage 2 — Inbound Triage' :
+               status === 'AWAITING_CS'         ? 'Stage 1 — CS Payment Review' :
+               status === 'DISPUTED'            ? 'Stage 1 — CS Review (Disputed)' :
+               status === 'WAITING_FOR_MECHANIC'|| status === 'IN_REPAIR' || status === 'QC_FAILED'
+                                                ? 'Stage 3 — Mechanic Workshop' :
+               status === 'QUALITY_CONTROL'     ? 'Stage 4 — Outbound QC' :
+               status === 'READY_TO_SHIP'       ? 'Stage 4 — Dispatch' :
+               'Action required'}
             </div>
             <ActionPanel />
           </div>

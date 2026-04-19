@@ -19,7 +19,7 @@ export const POST = withErrorHandler(async (req: NextRequest, ctx: unknown) => {
   })
   if (!existing) return apiError('Case not found', 404)
 
-  if (!['AWAITING_CS', 'DISPUTED', 'WAITING_FOR_MECHANIC'].includes(existing.status)) {
+  if (!['AWAITING_INBOUND', 'AWAITING_CS', 'DISPUTED', 'WAITING_FOR_MECHANIC'].includes(existing.status)) {
     return apiError(`Case is in status ${existing.status} — CS cannot update at this stage`, 400)
   }
 

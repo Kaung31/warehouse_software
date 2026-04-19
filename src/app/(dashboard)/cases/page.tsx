@@ -10,9 +10,8 @@ import LinkRow from '@/components/ui/LinkRow'
 
 const ROLE_FILTER: Record<string, string[]> = {
   MECHANIC:  ['WAITING_FOR_MECHANIC', 'IN_REPAIR', 'QC_FAILED'],
-  CS:        ['AWAITING_CS', 'DISPUTED'],
-  WAREHOUSE: ['QUALITY_CONTROL', 'READY_TO_SHIP'],
-  INBOUND:   ['AWAITING_CS', 'BGRADE_RECORDED'],
+  CS:        ['AWAITING_INBOUND', 'AWAITING_CS', 'DISPUTED'],
+  WAREHOUSE: ['AWAITING_INBOUND', 'QUALITY_CONTROL', 'READY_TO_SHIP'],
 }
 
 export default async function CasesPage({
@@ -67,7 +66,7 @@ export default async function CasesPage({
   const pages = Math.ceil(total / take)
 
   const ALL_STATUSES = [
-    'AWAITING_CS', 'WAITING_FOR_MECHANIC', 'DISPUTED',
+    'AWAITING_INBOUND', 'AWAITING_CS', 'WAITING_FOR_MECHANIC', 'DISPUTED',
     'IN_REPAIR', 'QUALITY_CONTROL', 'QC_FAILED',
     'READY_TO_SHIP', 'DISPATCHED', 'BGRADE_RECORDED',
   ]
