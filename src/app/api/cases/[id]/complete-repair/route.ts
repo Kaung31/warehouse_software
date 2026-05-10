@@ -3,6 +3,7 @@ import { requireAuth, parseBody, apiSuccess, apiError, withErrorHandler } from '
 import { completeRepairSchema } from '@/lib/schemas/case'
 import { logAudit } from '@/lib/audit'
 import { prisma } from '@/lib/prisma'
+import { autoSetLocation } from '@/lib/autoLocation'
 
 type Ctx = { params: Promise<{ id: string }> }
 
@@ -42,6 +43,15 @@ export const POST = withErrorHandler(async (req: NextRequest, ctx: unknown) => {
       },
     })
 
+    // BGRADE: save mechanic grading to scooter record
+    if (data.colour !== undefined || data.totalMileage !== undefined || data.grade !== undefined) {
+      const scooterUpdate: Record<string, unknown> = {}
+      if (data.colour       !== undefined) scooterUpdate.colour       = data.colour
+      if (data.totalMileage !== undefined) scooterUpdate.totalMileage = data.totalMileage
+      if (data.grade        !== undefined) scooterUpdate.grade        = data.grade as 'A' | 'B' | 'C'
+      await tx.scooter.update({ where: { id: existing.scooterId }, data: scooterUpdate })
+    }
+
     await tx.repairTimeLog.upsert({
       where:  { caseId: id },
       create: { caseId: id, mechanicId: user.id, startedAt, completedAt: now, durationMinutes: durationMins },
@@ -58,6 +68,8 @@ export const POST = withErrorHandler(async (req: NextRequest, ctx: unknown) => {
       },
     })
   })
+
+  await autoSetLocation(id, 'QUALITY_CONTROL')
 
   await logAudit({
     userId: user.id, action: 'case.repair_completed',

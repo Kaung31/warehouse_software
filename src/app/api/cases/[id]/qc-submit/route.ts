@@ -3,6 +3,10 @@ import { requireAuth, parseBody, apiSuccess, apiError, withErrorHandler } from '
 import { qcSubmitSchema } from '@/lib/schemas/case'
 import { logAudit } from '@/lib/audit'
 import { prisma } from '@/lib/prisma'
+import { autoSetLocation } from '@/lib/autoLocation'
+import { enqueue } from '@/lib/queue'
+import { invalidateCaseCache } from '@/lib/cache'
+import { broadcastCaseUpdate } from '@/lib/pusher'
 
 type Ctx = { params: Promise<{ id: string }> }
 
@@ -57,16 +61,33 @@ export const POST = withErrorHandler(async (req: NextRequest, ctx: unknown) => {
       })),
     })
 
-    const newStatus = overallResult === 'PASS' ? 'READY_TO_SHIP' : 'WAITING_FOR_MECHANIC'
+    // BGRADE cases go to BGRADE_RECORDED on pass (not READY_TO_SHIP)
+    const isBgrade = existing.caseType === 'BGRADE'
+    const newStatus = overallResult === 'PASS'
+      ? (isBgrade ? 'BGRADE_RECORDED' : 'READY_TO_SHIP')
+      : 'WAITING_FOR_MECHANIC'
 
-    await tx.repairOrder.update({
-      where: { id },
-      data: {
-        status:            newStatus,
-        qcPassed:          overallResult === 'PASS',
-        lastQCSubmissionId: sub.id,
-      },
-    })
+    const repairUpdateData: Record<string, unknown> = {
+      status:             newStatus,
+      qcPassed:           overallResult === 'PASS',
+      lastQCSubmissionId: sub.id,
+    }
+
+    // Assign to output pallet if provided (BGRADE QC pass)
+    if (isBgrade && overallResult === 'PASS' && data.palletId) {
+      repairUpdateData.currentPalletId = data.palletId
+    }
+
+    await tx.repairOrder.update({ where: { id }, data: repairUpdateData })
+
+    // Create pallet item assignment for B-grade output pallet
+    if (isBgrade && overallResult === 'PASS' && data.palletId) {
+      await tx.palletItem.upsert({
+        where: { palletId_repairOrderId: { palletId: data.palletId, repairOrderId: id } },
+        create: { palletId: data.palletId, repairOrderId: id, addedById: user.id },
+        update: { removedAt: null },
+      })
+    }
 
     await tx.caseStatusHistory.create({
       data: {
@@ -75,7 +96,7 @@ export const POST = withErrorHandler(async (req: NextRequest, ctx: unknown) => {
         toStatus:    newStatus,
         changedById: user.id,
         reason:      overallResult === 'PASS'
-          ? 'QC passed — ready to ship'
+          ? (isBgrade ? 'QC passed — B-grade recorded to pallet' : 'QC passed — ready to ship')
           : `QC failed — ${data.results.filter(r => r.result === 'FAIL').length} step(s) failed`,
       },
     })
@@ -100,10 +121,33 @@ export const POST = withErrorHandler(async (req: NextRequest, ctx: unknown) => {
     return sub
   })
 
+  const isBgradeCase = existing.caseType === 'BGRADE'
+  const newStatus = submission.overallResult === 'PASS'
+    ? (isBgradeCase ? 'BGRADE_RECORDED' : 'READY_TO_SHIP')
+    : 'WAITING_FOR_MECHANIC'
+  await autoSetLocation(id, newStatus)
+
   await logAudit({
     userId: user.id, action: 'case.qc_submitted',
     entityType: 'RepairOrder', entityId: id,
     newValue: { overallResult, submissionId: submission.id },
+  })
+
+  await invalidateCaseCache(id)
+
+  // Phase B — notify the customer only when QC passes on a warranty
+  // case. QC failures stay internal (the case loops back to mechanic),
+  // and BGRADE cases have no customer.
+  if (submission.overallResult === 'PASS' && !isBgradeCase) {
+    await enqueue('notify-status-change', { caseId: id, toStatus: 'READY_TO_SHIP' })
+  }
+  await broadcastCaseUpdate({
+    caseId:   id,
+    toStatus: submission.overallResult === 'PASS'
+      ? (isBgradeCase ? 'BGRADE_RECORDED' : 'READY_TO_SHIP')
+      : 'WAITING_FOR_MECHANIC',
+    role:     submission.overallResult === 'PASS' ? 'WAREHOUSE' : 'MECHANIC',
+    type:     'status_change',
   })
 
   return apiSuccess({ overallResult, submissionId: submission.id })

@@ -2,6 +2,10 @@ import { NextRequest } from 'next/server'
 import { requireAuth, apiSuccess, apiError, withErrorHandler } from '@/lib/api-helpers'
 import { logAudit } from '@/lib/audit'
 import { prisma } from '@/lib/prisma'
+import { autoSetLocation } from '@/lib/autoLocation'
+import { enqueue } from '@/lib/queue'
+import { invalidateCaseCache } from '@/lib/cache'
+import { broadcastCaseUpdate } from '@/lib/pusher'
 
 type Ctx = { params: Promise<{ id: string }> }
 
@@ -51,11 +55,19 @@ export const POST = withErrorHandler(async (_req: NextRequest, ctx: unknown) => 
     })
   })
 
+  await autoSetLocation(id, 'IN_REPAIR')
+
   await logAudit({
     userId: user.id, action: 'case.repair_started',
     entityType: 'RepairOrder', entityId: id,
     newValue: { startedAt: now.toISOString() },
   })
+
+  await invalidateCaseCache(id)
+
+  // Phase B — notify the customer the repair has started.
+  await enqueue('notify-status-change', { caseId: id, toStatus: 'IN_REPAIR' })
+  await broadcastCaseUpdate({ caseId: id, toStatus: 'IN_REPAIR', role: 'MECHANIC', type: 'status_change' })
 
   return apiSuccess({ startedAt: now })
 })

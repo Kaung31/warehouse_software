@@ -4,6 +4,8 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import PageHeader from '@/components/ui/PageHeader'
 import Btn from '@/components/ui/Btn'
+import PhotoCapture, { type CapturedPhoto } from '@/components/ui/PhotoCapture'
+import { uploadPhotos } from '@/lib/uploadPhotos'
 
 type ScooterHistory = {
   id: string; orderNumber: string; status: string; faultDescription: string; createdAt: string
@@ -17,7 +19,6 @@ export default function NewCasePage() {
     serialNumber:     '',
     brand:            '',
     model:            '',
-    caseType:         '' as 'WARRANTY' | 'BGRADE' | '',
     customerName:     '',
     customerPostcode: '',
     customerPhone:    '',
@@ -25,16 +26,19 @@ export default function NewCasePage() {
     invoiceNumber:    '',
     faultDescription: '',
     internalNotes:    '',
-    priority:         'NORMAL',
+    priority:          'NORMAL',
+    customerPrepaid:   false,
+    csPaymentNote:     '',
+    warrantyConfirmed: false,
   })
-  const [history,   setHistory]   = useState<ScooterHistory[]>([])
-  const [busy,      setBusy]      = useState(false)
-  const [error,     setError]     = useState('')
-  const [lookingUp, setLookingUp] = useState(false)
+  const [history,         setHistory]         = useState<ScooterHistory[]>([])
+  const [customerPhotos,  setCustomerPhotos]  = useState<CapturedPhoto[]>([])
+  const [busy,            setBusy]            = useState(false)
+  const [error,           setError]           = useState('')
+  const [lookingUp,       setLookingUp]       = useState(false)
 
   useEffect(() => { serialRef.current?.focus() }, [])
 
-  // Debounced serial lookup — auto-fills brand/model if scooter already in DB
   useEffect(() => {
     if (form.serialNumber.length < 4) { setHistory([]); return }
     const t = setTimeout(async () => {
@@ -55,13 +59,12 @@ export default function NewCasePage() {
     return () => clearTimeout(t)
   }, [form.serialNumber])
 
-  function set(field: string, value: string) {
+  function set(field: string, value: string | boolean) {
     setForm(f => ({ ...f, [field]: value }))
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
-    if (!form.caseType) { setError('Select WARRANTY or B-GRADE'); return }
     setBusy(true); setError('')
 
     const res = await fetch('/api/cases/intake', {
@@ -71,37 +74,41 @@ export default function NewCasePage() {
         serialNumber:     form.serialNumber.trim().toUpperCase(),
         brand:            form.brand.trim(),
         model:            form.model.trim(),
-        caseType:         form.caseType,
+        caseType:         'WARRANTY',
         customerName:     form.customerName.trim()     || undefined,
         customerPostcode: form.customerPostcode.trim() || undefined,
         customerPhone:    form.customerPhone.trim()    || undefined,
         customerEmail:    form.customerEmail.trim()    || undefined,
         invoiceNumber:    form.invoiceNumber.trim()    || undefined,
         faultDescription: form.faultDescription.trim(),
-        internalNotes:    form.internalNotes.trim()   || undefined,
-        priority:         form.priority,
+        internalNotes:    form.internalNotes.trim()    || undefined,
+        priority:          form.priority,
+        customerPrepaid:   form.customerPrepaid,
+        csPaymentNote:     form.csPaymentNote.trim()    || undefined,
+        warrantyConfirmed: form.warrantyConfirmed,
       }),
     })
 
-    setBusy(false)
     if (res.ok) {
       const { data } = await res.json()
-      router.push(`/cases/${data.id}`)
+      if (customerPhotos.length > 0) {
+        await uploadPhotos(customerPhotos, data.id, 'RepairOrder', 'DAMAGE_REPORT')
+      }
+      setBusy(false)
+      router.push(`/cases/${data.id}/label`)
     } else {
+      setBusy(false)
       const body = await res.json()
       setError(body.error ?? 'Failed to create case')
     }
   }
 
-  const isWarranty = form.caseType === 'WARRANTY'
-  const isBgrade   = form.caseType === 'BGRADE'
-
   return (
     <div className="fade-up">
       <PageHeader
-        title="New case"
-        sub="Stage 1 of 4 — CS creates the case folder"
-        action={<Link href="/cases"><Btn variant="ghost" size="sm">← Back</Btn></Link>}
+        title="New warranty case"
+        sub="CS intake — Stage 1 of 4"
+        action={<Link href="/cases"><Btn variant="ghost" size="sm">← Back to Cases</Btn></Link>}
       />
 
       {/* Workflow steps indicator */}
@@ -140,7 +147,7 @@ export default function NewCasePage() {
         <form onSubmit={submit}>
           <div className="card" style={{ padding: '24px 24px 8px' }}>
 
-            {/* Serial number — customer provides this, or it's on their invoice */}
+            {/* Serial number */}
             <div style={{ marginBottom: 24 }}>
               <label style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', marginBottom: 8, display: 'block' }}>
                 Serial number <Req />
@@ -173,90 +180,108 @@ export default function NewCasePage() {
                 <input list="models" value={form.model} onChange={e => set('model', e.target.value)}
                   placeholder="Pure Air, M365…" required />
                 <datalist id="models">
-                  {['Pure Air','Pure Air Pro','Xiaomi M365','Ninebot Max','Apollo City'].map(m => <option key={m} value={m} />)}
+                  {['Pure Air','Pure Air Pro','Pure Air Go','Pure Air Pro 2','Xiaomi M365','Xiaomi M365 Pro','Xiaomi ES4','Segway Ninebot Max','Segway G30','Apollo City'].map(m => <option key={m} value={m} />)}
                 </datalist>
               </Field>
             </div>
 
             <Divider />
 
-            {/* Case type */}
-            <div style={{ marginBottom: 20 }}>
-              <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 10, display: 'block' }}>
-                Case type <Req />
-              </label>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                {[
-                  { key: 'WARRANTY', label: '🔒 WARRANTY', desc: 'Customer submitted with invoice', colour: 'var(--accent)' },
-                  { key: 'BGRADE',   label: '♻ B-GRADE',   desc: 'Pre-owned / refurb grading',    colour: 'var(--amber)' },
-                ].map(opt => (
-                  <button key={opt.key} type="button" onClick={() => set('caseType', opt.key)}
-                    style={{
-                      padding: '16px', cursor: 'pointer', textAlign: 'left', transition: 'all 0.15s',
-                      border:      `2px solid ${form.caseType === opt.key ? opt.colour : 'var(--border)'}`,
-                      borderRadius: 'var(--radius-lg)',
-                      background:   form.caseType === opt.key ? opt.colour + '18' : 'var(--bg-raised)',
-                    }}
-                  >
-                    <div style={{ fontWeight: 600, fontSize: 14, color: form.caseType === opt.key ? opt.colour : 'var(--text)', marginBottom: 4 }}>
-                      {opt.label}
-                    </div>
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{opt.desc}</div>
-                  </button>
-                ))}
-              </div>
+            {/* Customer details */}
+            <SectionLabel>Customer details</SectionLabel>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+              <Field label="Full name *">
+                <input value={form.customerName} onChange={e => set('customerName', e.target.value)}
+                  placeholder="John Smith" required />
+              </Field>
+              <Field label="Postcode *">
+                <input value={form.customerPostcode} onChange={e => set('customerPostcode', e.target.value.toUpperCase())}
+                  placeholder="SW1A 1AA" required style={{ fontFamily: 'var(--font-mono)' }} />
+              </Field>
+              <Field label="Phone">
+                <input value={form.customerPhone} onChange={e => set('customerPhone', e.target.value)}
+                  placeholder="07700 900000" />
+              </Field>
+              <Field label="Email">
+                <input type="email" value={form.customerEmail} onChange={e => set('customerEmail', e.target.value)}
+                  placeholder="john@example.com" />
+              </Field>
             </div>
 
-            {/* Customer details */}
-            {(isWarranty || isBgrade) && (
-              <>
-                <Divider />
-                <div style={{ marginBottom: 6 }}>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 10, display: 'block' }}>
-                    Customer {isWarranty
-                      ? <Req />
-                      : <span style={{ color: 'var(--text-faint)', fontWeight: 400 }}>(optional)</span>}
-                  </label>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                    <Field label={isWarranty ? 'Full name *' : 'Full name'}>
-                      <input value={form.customerName} onChange={e => set('customerName', e.target.value)}
-                        placeholder="John Smith" required={isWarranty} />
-                    </Field>
-                    <Field label={isWarranty ? 'Postcode *' : 'Postcode'}>
-                      <input value={form.customerPostcode} onChange={e => set('customerPostcode', e.target.value.toUpperCase())}
-                        placeholder="SW1A 1AA" required={isWarranty} style={{ fontFamily: 'var(--font-mono)' }} />
-                    </Field>
-                    <Field label="Phone">
-                      <input value={form.customerPhone} onChange={e => set('customerPhone', e.target.value)}
-                        placeholder="07700 900000" />
-                    </Field>
-                    <Field label="Email">
-                      <input type="email" value={form.customerEmail} onChange={e => set('customerEmail', e.target.value)}
-                        placeholder="john@example.com" />
-                    </Field>
-                  </div>
-                </div>
-              </>
-            )}
-
-            {/* Invoice number (WARRANTY) */}
-            {isWarranty && (
-              <div style={{ marginBottom: 20 }}>
-                <Field label="Invoice / ticket number *">
-                  <input value={form.invoiceNumber} onChange={e => set('invoiceNumber', e.target.value)}
-                    placeholder="INV-00123" required style={{ fontFamily: 'var(--font-mono)' }} />
-                </Field>
-              </div>
-            )}
+            {/* Invoice */}
+            <div style={{ marginBottom: 20 }}>
+              <Field label="Invoice / ticket number *">
+                <input value={form.invoiceNumber} onChange={e => set('invoiceNumber', e.target.value)}
+                  placeholder="INV-00123" required style={{ fontFamily: 'var(--font-mono)' }} />
+              </Field>
+            </div>
 
             <Divider />
 
-            {/* Customer complaint — what the customer reported */}
+            {/* Payment status — collected here at intake */}
+            <SectionLabel>Payment status at intake</SectionLabel>
+            <label style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 14, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={form.customerPrepaid}
+                onChange={e => set('customerPrepaid', e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                Customer has already paid (before scooter arrived)
+              </span>
+            </label>
+            <Field label={form.customerPrepaid ? 'What did they pay for? *' : 'Payment notes (optional)'}>
+              <textarea
+                rows={2}
+                value={form.csPaymentNote}
+                onChange={e => set('csPaymentNote', e.target.value)}
+                placeholder={form.customerPrepaid
+                  ? 'e.g. Paid £120 for labour + brake cable on 2026-04-20 via card'
+                  : 'e.g. Customer will pay on collection, quote pending approval…'}
+                required={form.customerPrepaid}
+                style={{ resize: 'vertical' }}
+              />
+            </Field>
+
+            <Divider />
+
+            {/* Warranty confirmation */}
+            <SectionLabel>Warranty status</SectionLabel>
+            <label style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 14, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={form.warrantyConfirmed}
+                onChange={e => set('warrantyConfirmed', e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                Scooter is confirmed under warranty
+              </span>
+            </label>
+
+            <Divider />
+
+            {/* Customer complaint */}
             <Field label="Customer complaint *">
               <textarea rows={4} value={form.faultDescription} onChange={e => set('faultDescription', e.target.value)}
                 placeholder="Describe the fault or issue as reported by the customer…"
                 required style={{ resize: 'vertical' }} />
             </Field>
+
+            {/* Customer evidence photos */}
+            <div style={{ marginBottom: 20 }}>
+              <PhotoCapture
+                label="Customer evidence photos (optional)"
+                photos={customerPhotos}
+                onChange={setCustomerPhotos}
+                maxPhotos={6}
+                samplePhotos={[
+                  { url: 'https://picsum.photos/seed/cs1/200/200', caption: 'Photo from customer' },
+                  { url: 'https://picsum.photos/seed/cs2/200/200', caption: 'Damage evidence' },
+                ]}
+              />
+            </div>
 
             <div style={{ padding: '10px 14px', background: 'var(--bg-raised)', borderRadius: 'var(--radius)', border: '1px solid var(--border-muted)', fontSize: 12, color: 'var(--text-muted)', marginBottom: 20 }}>
               Error codes and technical diagnosis will be recorded by the <strong>Inbound team</strong> when the scooter physically arrives.
@@ -290,25 +315,23 @@ export default function NewCasePage() {
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, paddingBottom: 24 }}>
               <Link href="/cases"><Btn variant="secondary">Cancel</Btn></Link>
               <Btn variant="primary" type="submit" disabled={busy}>
-                {busy ? 'Creating…' : '+ Create case folder'}
+                {busy ? 'Creating…' : '+ Create warranty case'}
               </Btn>
             </div>
           </div>
         </form>
 
-        {/* ─── Right panel: history + instructions ─── */}
+        {/* ─── Right panel ─── */}
         <div style={{ position: 'sticky', top: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
-
-          {/* Workflow instructions */}
           <div className="card" style={{ padding: '18px 20px' }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 14 }}>
               What happens next
             </div>
             {[
-              { icon: '1', text: 'CS creates this folder with customer details + complaint' },
-              { icon: '2', text: 'Inbound team scans the scooter when it arrives & adds diagnosis' },
-              { icon: '3', text: 'CS confirms payment — unlocks mechanic queue' },
-              { icon: '4', text: 'Mechanic fixes it, Outbound QC checks & ships' },
+              { icon: '1', text: 'CS creates this folder — customer details + complaint + payment status' },
+              { icon: '2', text: 'Inbound team scans the scooter on arrival & records error codes + diagnosis' },
+              { icon: '3', text: 'CS confirms payment (if not already collected) — unlocks mechanic queue' },
+              { icon: '4', text: 'Mechanic repairs it, Outbound QC checks and generates DPD label to ship' },
             ].map(step => (
               <div key={step.icon} style={{ display: 'flex', gap: 10, marginBottom: 12, alignItems: 'flex-start' }}>
                 <div style={{
@@ -363,6 +386,13 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   return (
     <div style={{ marginBottom: 18 }}>
       <label>{label}</label>
+      {children}
+    </div>
+  )
+}
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>
       {children}
     </div>
   )

@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────
+  # 1. Static analysis: typecheck + lint. No secrets needed.
+  # ───────────────────────────────────────────────────────────────────
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate
+      - name: TypeScript
+        run: npx tsc --noEmit -p .
+      - name: ESLint
+        run: npm run lint
+
+  # ───────────────────────────────────────────────────────────────────
+  # 2. Unit tests (Vitest). No DB required.
+  # ───────────────────────────────────────────────────────────────────
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm test
+
+  # ───────────────────────────────────────────────────────────────────
+  # 3. Neon branch + integration tests + migration diff.
+  #    Skipped on forks (no secrets).
+  # ───────────────────────────────────────────────────────────────────
+  neon-branch:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    needs: static
+    permissions:
+      pull-requests: write
+    outputs:
+      database_url: ${{ steps.create.outputs.db_url }}
+      direct_url:   ${{ steps.create.outputs.direct_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create Neon PR branch
+        id: create
+        uses: neondatabase/create-branch-action@v5
+        with:
+          project_id:    ${{ secrets.NEON_PROJECT_ID }}
+          branch_name:   pr-${{ github.event.number }}
+          api_key:       ${{ secrets.NEON_API_KEY }}
+          username:      ${{ secrets.NEON_DB_USER }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate
+
+      - name: Migration diff (against PR branch)
+        env:
+          DATABASE_URL: ${{ steps.create.outputs.db_url }}
+          DIRECT_URL:   ${{ steps.create.outputs.db_url }}
+        run: |
+          echo "::group::Pending migrations"
+          npx prisma migrate diff \
+            --from-url $DIRECT_URL \
+            --to-schema-datamodel prisma/schema.prisma \
+            --script || true
+          echo "::endgroup::"
+          npx prisma migrate deploy
+
+  # ───────────────────────────────────────────────────────────────────
+  # 4. Tear the branch down on PR close.
+  # ───────────────────────────────────────────────────────────────────
+  neon-cleanup:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    steps:
+      - uses: neondatabase/delete-branch-action@v3
+        with:
+          project_id:  ${{ secrets.NEON_PROJECT_ID }}
+          branch:      pr-${{ github.event.number }}
+          api_key:     ${{ secrets.NEON_API_KEY }}
+
+  # ───────────────────────────────────────────────────────────────────
+  # 5. Playwright E2E. Run against PR's Neon branch + a Next.js
+  #    `npm run dev` server. Skipped on forks.
+  # ───────────────────────────────────────────────────────────────────
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [static, unit, neon-branch]
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx playwright install --with-deps chromium
+      - name: Run Playwright
+        env:
+          DATABASE_URL:                       ${{ needs.neon-branch.outputs.database_url }}
+          DIRECT_URL:                         ${{ needs.neon-branch.outputs.direct_url }}
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:  ${{ secrets.CLERK_PUBLISHABLE_KEY_TEST }}
+          CLERK_SECRET_KEY:                   ${{ secrets.CLERK_SECRET_KEY_TEST }}
+          TRACK_TOKEN_SECRET:                 ${{ secrets.TRACK_TOKEN_SECRET_TEST }}
+        run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/

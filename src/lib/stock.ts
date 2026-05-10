@@ -1,5 +1,6 @@
 import { prisma } from './prisma'
 import { MovementReason } from '@prisma/client'
+import { withPartLock } from './locks'
 
 type ConsumePartParams = {
   repairOrderId: string
@@ -8,12 +9,19 @@ type ConsumePartParams = {
   performedById: string
 }
 
-// This is the ONLY way stock should ever be reduced for a repair
-// It's atomic — either the stock deducts AND the repair part record creates, or neither happens
+// This is the ONLY way stock should ever be reduced for a repair.
+// It's atomic — either the stock deducts AND the repair part record
+// creates, or neither happens.
+//
+// Phase 2: distributed lock keyed by partId via Upstash so two
+// mechanics on different containers can't both pass the stockQty
+// check before either of them writes. The transaction below already
+// guards against a single-process race; the lock generalises that
+// guarantee across the Railway cluster.
 export async function consumePartForRepair(params: ConsumePartParams) {
   const { repairOrderId, partId, quantity, performedById } = params
 
-  return prisma.$transaction(async (tx) => {
+  return withPartLock(partId, () => prisma.$transaction(async (tx) => {
     // Lock the part row while we check stock (prevents race conditions with 27 concurrent users)
     const part = await tx.part.findUnique({ where: { id: partId } })
     if (!part) return { success: false, error: 'Part not found' }
@@ -53,7 +61,7 @@ export async function consumePartForRepair(params: ConsumePartParams) {
     })
 
     return { success: true, repairPart }
-  })
+  }))
 }
 
 type AdjustStockParams = {

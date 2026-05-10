@@ -1,21 +1,22 @@
 import { Webhook } from 'svix'
 import { headers } from 'next/headers'
-import { WebhookEvent } from '@clerk/nextjs/server'
+import type { WebhookEvent } from '@clerk/nextjs/server'
 import { prisma } from '@/lib/prisma'
-import { Role } from '@prisma/client'
-import { NextResponse } from 'next/server'
 
 export async function POST(req: Request) {
   const WEBHOOK_SECRET = process.env.CLERK_WEBHOOK_SECRET
-  if (!WEBHOOK_SECRET) return new NextResponse('Missing webhook secret', { status: 500 })
+
+  if (!WEBHOOK_SECRET) {
+    throw new Error('Missing CLERK_WEBHOOK_SECRET')
+  }
 
   const headerPayload = await headers()
-  const svix_id        = headerPayload.get('svix-id')
+  const svix_id = headerPayload.get('svix-id')
   const svix_timestamp = headerPayload.get('svix-timestamp')
   const svix_signature = headerPayload.get('svix-signature')
 
   if (!svix_id || !svix_timestamp || !svix_signature) {
-    return new NextResponse('Missing svix headers', { status: 400 })
+    return new Response('Missing headers', { status: 400 })
   }
 
   const payload = await req.json()
@@ -26,39 +27,33 @@ export async function POST(req: Request) {
 
   try {
     evt = wh.verify(body, {
-      'svix-id':        svix_id,
+      'svix-id': svix_id,
       'svix-timestamp': svix_timestamp,
       'svix-signature': svix_signature,
     }) as WebhookEvent
-  } catch {
-    return new NextResponse('Invalid signature', { status: 400 })
+  } catch (err) {
+    console.error('Webhook verification failed:', err)
+    return new Response('Verification failed', { status: 400 })
   }
 
-  if (evt.type === 'user.created') {
-    const { id, email_addresses, first_name, last_name } = evt.data
-    const email = email_addresses[0]?.email_address ?? ''
-    const name  = [first_name, last_name].filter(Boolean).join(' ') || email
+  const eventType = evt.type
 
-    await prisma.user.upsert({
-      where:  { clerkId: id },
-      update: { name, email },
-      create: {
+  if (eventType === 'user.created') {
+    const { id, email_addresses, first_name } = evt.data
+    const email = email_addresses[0]?.email_address
+
+    await prisma.user.create({
+      data: {
         clerkId: id,
-        name,
-        email,
-        role: Role.CS,
+        email: email ?? '',
+        name: first_name ?? email ?? 'User',
+        role: 'WAREHOUSE', // Default role
+        isActive: true,
       },
     })
+
+    console.log('✅ User synced from Clerk webhook:', email)
   }
 
-  if (evt.type === 'user.deleted') {
-    if (evt.data.id) {
-      await prisma.user.updateMany({
-        where: { clerkId: evt.data.id },
-        data:  { isActive: false },
-      })
-    }
-  }
-
-  return new NextResponse('OK', { status: 200 })
+  return new Response('OK', { status: 200 })
 }

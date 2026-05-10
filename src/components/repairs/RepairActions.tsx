@@ -17,7 +17,7 @@ export default function RepairActions({ repair, mechanics, userRole, userId }: P
   const [busy,  setBusy]  = useState(false)
   const [error, setError] = useState('')
 
-  const nextStatuses = STATUS_TRANSITIONS[repair.status]
+  const nextStatuses = STATUS_TRANSITIONS[repair.status] ?? []
   const canChangeStatus = userRole !== 'CS' && userRole !== 'WAREHOUSE'
   const canAssign       = ['ADMIN', 'MANAGER'].includes(userRole)
   const canShip         = ['ADMIN', 'MANAGER', 'WAREHOUSE'].includes(userRole)

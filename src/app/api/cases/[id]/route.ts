@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
 import { requireAuth, apiSuccess, apiError, withErrorHandler } from '@/lib/api-helpers'
+import { logAudit } from '@/lib/audit'
 import { prisma } from '@/lib/prisma'
 
 type Ctx = { params: Promise<{ id: string }> }
@@ -52,4 +53,40 @@ export const GET = withErrorHandler(async (_req: NextRequest, ctx: unknown) => {
 
   // CS cannot see mechanic-only notes on non-CS stages — keep it simple, return all
   return apiSuccess(caseRecord)
+})
+
+// DELETE — cancels a case (ADMIN / MANAGER only).
+// Cases in early stages (AWAITING_INBOUND, BGRADE_RECORDED) are hard-deleted.
+// Cases that have progressed are transitioned to CANCELLED to preserve history.
+export const DELETE = withErrorHandler(async (_req: NextRequest, ctx: unknown) => {
+  const user = await requireAuth('case:cs_update') // reuse — only CS+ can cancel
+  if (!['ADMIN', 'MANAGER'].includes(user.role)) {
+    return apiError('Only admins and managers can delete cases', 403)
+  }
+
+  const { id } = await (ctx as Ctx).params
+  const existing = await prisma.repairOrder.findUnique({ where: { id } })
+  if (!existing) return apiError('Case not found', 404)
+
+  if (existing.status === 'DISPATCHED') {
+    return apiError('Cannot delete a dispatched case', 400)
+  }
+
+  const earlyStatuses = ['AWAITING_INBOUND', 'BGRADE_RECORDED']
+  if (earlyStatuses.includes(existing.status)) {
+    // Hard delete — nothing has happened yet
+    await prisma.repairOrder.delete({ where: { id } })
+    await logAudit({ userId: user.id, action: 'case.deleted', entityType: 'RepairOrder', entityId: id, oldValue: { status: existing.status, orderNumber: existing.orderNumber } })
+    return apiSuccess({ deleted: true })
+  }
+
+  // Soft cancel — preserve history
+  await prisma.$transaction(async tx => {
+    await tx.repairOrder.update({ where: { id }, data: { status: 'CANCELLED' } })
+    await tx.caseStatusHistory.create({
+      data: { caseId: id, fromStatus: existing.status, toStatus: 'CANCELLED', changedById: user.id, reason: 'Cancelled by admin' },
+    })
+  })
+  await logAudit({ userId: user.id, action: 'case.cancelled', entityType: 'RepairOrder', entityId: id, oldValue: { status: existing.status } })
+  return apiSuccess({ cancelled: true })
 })

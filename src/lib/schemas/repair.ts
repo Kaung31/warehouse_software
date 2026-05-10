@@ -34,6 +34,7 @@ export const STATUS_TRANSITIONS: Record<string, string[]> = {
   DISPATCHED:           [],
   CANCELLED:            [],
   // New workflow — transitions managed via dedicated API endpoints, not the generic status route
+  AWAITING_INBOUND:     [],
   AWAITING_CS:          [],
   WAITING_FOR_MECHANIC: [],
   DISPUTED:             ['WAITING_FOR_MECHANIC', 'CANCELLED'],

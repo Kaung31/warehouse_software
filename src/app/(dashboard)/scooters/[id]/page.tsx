@@ -6,12 +6,16 @@ import PageHeader from '@/components/ui/PageHeader'
 import StatusBadge from '@/components/ui/StatusBadge'
 import Btn from '@/components/ui/Btn'
 import LinkRow from '@/components/ui/LinkRow'
+import DeleteScooterButton from '@/components/scooters/DeleteScooterButton'
 
 type Ctx = { params: Promise<{ id: string }> }
 
 export default async function ScooterDetailPage({ params }: Ctx) {
   const { userId } = await auth()
   if (!userId) redirect('/sign-in')
+
+  const currentUser = await prisma.user.findUnique({ where: { clerkId: userId }, select: { role: true } })
+  if (!currentUser) redirect('/dashboard')
 
   const { id } = await params
 
@@ -53,6 +57,9 @@ export default async function ScooterDetailPage({ params }: Ctx) {
         action={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <StatusBadge status={scooter.status} type="scooter" />
+            {['ADMIN', 'MANAGER'].includes(currentUser.role) && (
+              <DeleteScooterButton scooterId={scooter.id} serialNumber={scooter.serialNumber} />
+            )}
             <Link href="/scooters"><Btn variant="ghost" size="sm">← Back</Btn></Link>
           </div>
         }

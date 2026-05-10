@@ -3,7 +3,15 @@ import { requireAuth, apiSuccess, withErrorHandler } from '@/lib/api-helpers'
 import { prisma } from '@/lib/prisma'
 import { Role } from '@prisma/client'
 import { subDays, startOfDay, startOfWeek, startOfMonth } from 'date-fns'
+import { cached, dashboardKey } from '@/lib/cache'
 
+/**
+ * GET /api/dashboard
+ *
+ * Phase 2 — Upstash-backed cache. 5-minute TTL keyed per-role and
+ * per-user; invalidated by any case-status mutation via
+ * `invalidateCaseCache()` in `lib/cache.ts`.
+ */
 export const GET = withErrorHandler(async (_req: NextRequest) => {
   const user = await requireAuth('repair:view')
 
@@ -13,22 +21,24 @@ export const GET = withErrorHandler(async (_req: NextRequest) => {
   const monthStart   = startOfMonth(now)
   const last30Days   = subDays(now, 30)
 
+  const key = dashboardKey({ role: user.role, endpoint: 'main', userId: user.id })
+
   // Every role gets their own tailored data
   if (user.role === Role.MECHANIC) {
-    return apiSuccess(await getMechanicDashboard(user.id, todayStart))
+    return apiSuccess(await cached(key, () => getMechanicDashboard(user.id, todayStart)))
   }
 
   if (user.role === Role.WAREHOUSE) {
-    return apiSuccess(await getWarehouseDashboard(todayStart))
+    return apiSuccess(await cached(key, () => getWarehouseDashboard(todayStart)))
   }
 
   if (user.role === Role.CS) {
-    return apiSuccess(await getCSDashboard(todayStart, weekStart))
+    return apiSuccess(await cached(key, () => getCSDashboard(todayStart, weekStart)))
   }
 
   // ADMIN and MANAGER get the full dashboard
   return apiSuccess(
-    await getManagerDashboard(todayStart, weekStart, monthStart, last30Days)
+    await cached(key, () => getManagerDashboard(todayStart, weekStart, monthStart, last30Days)),
   )
 })
 

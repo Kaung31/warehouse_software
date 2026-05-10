@@ -1,46 +1,70 @@
 import { NextRequest } from 'next/server'
-import { z } from 'zod'
-import { requireAuth, parseBody, apiSuccess, apiError, withErrorHandler } from '@/lib/api-helpers'
-import { getUploadUrl, validateFileUpload } from '@/lib/r2'
+import { requireAuth, apiSuccess, apiError, withErrorHandler } from '@/lib/api-helpers'
+import { r2 } from '@/lib/r2'
+import { PutObjectCommand } from '@aws-sdk/client-s3'
 import { prisma } from '@/lib/prisma'
 import { randomUUID } from 'crypto'
+import { enqueue } from '@/lib/queue'
 
-const uploadSchema = z.object({
-  contentType: z.enum(['image/jpeg', 'image/png', 'image/webp']),
-  sizeBytes:   z.number().int().positive(),
-  photoType:   z.enum(['SCOOTER_INBOUND', 'SCOOTER_OUTBOUND', 'REPAIR_EVIDENCE', 'DAMAGE_REPORT']),
-  entityType:  z.enum(['Scooter', 'RepairOrder']),
-  entityId:    z.string().cuid(),
-  caption:     z.string().max(200).optional(),
-})
+const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/heic', 'image/heif']
+const MAX_SIZE      = 10 * 1024 * 1024 // 10 MB
 
+const VALID_PHOTO_TYPES  = ['SCOOTER_INBOUND', 'SCOOTER_OUTBOUND', 'REPAIR_EVIDENCE', 'DAMAGE_REPORT']
+const VALID_ENTITY_TYPES = ['Scooter', 'RepairOrder']
+
+// Accepts multipart/form-data: the file goes server→R2, never browser→R2.
+// This avoids all presigned-URL PUT issues (CORS, content-type mismatch, etc.)
 export const POST = withErrorHandler(async (req: NextRequest) => {
-  const user = await requireAuth('scooter:view') // any authenticated user can upload
+  const user = await requireAuth('scooter:view')
 
-  const { data, error } = await parseBody(req, uploadSchema)
-  if (error) return error
+  const formData   = await req.formData()
+  const file       = formData.get('file')       as File   | null
+  const photoType  = formData.get('photoType')  as string | null
+  const entityType = formData.get('entityType') as string | null
+  const entityId   = formData.get('entityId')   as string | null
+  const caption    = formData.get('caption')    as string | null
 
-  const validationError = validateFileUpload(data.contentType, data.sizeBytes)
-  if (validationError) return apiError(validationError, 400)
+  if (!file)       return apiError('No file provided', 400)
+  if (!photoType  || !VALID_PHOTO_TYPES.includes(photoType))   return apiError('Invalid photoType', 400)
+  if (!entityType || !VALID_ENTITY_TYPES.includes(entityType)) return apiError('Invalid entityType', 400)
+  if (!entityId)   return apiError('entityId is required', 400)
 
-  // Random key so users cannot guess other files' URLs
-  const ext = data.contentType.split('/')[1]
-  const key = `photos/${data.entityType.toLowerCase()}/${data.entityId}/${randomUUID()}.${ext}`
+  const contentType = file.type || 'image/jpeg'
+  if (!ALLOWED_TYPES.includes(contentType)) return apiError('Only JPEG, PNG and WebP images are allowed', 400)
+  if (file.size > MAX_SIZE)                 return apiError('File must be under 10 MB', 400)
 
-  const uploadUrl = await getUploadUrl(key, data.contentType)
+  // Normalise extension — iOS sends image/heic, store as .jpg after R2 accepts it
+  const ext = contentType.includes('jpeg') || contentType.includes('jpg') ? 'jpg'
+            : contentType.includes('png')  ? 'png'
+            : contentType.includes('webp') ? 'webp'
+            : 'jpg'
 
-  // Save the photo record — key stored, not the URL (URLs are generated on-demand)
-  await prisma.photo.create({
+  const key   = `photos/${entityType.toLowerCase()}/${entityId}/${randomUUID()}.${ext}`
+  const bytes = await file.arrayBuffer()
+
+  // Upload directly to R2 from the server — no presigned URL, no CORS issues
+  await r2.send(new PutObjectCommand({
+    Bucket:      process.env.R2_BUCKET_NAME!,
+    Key:         key,
+    Body:        Buffer.from(bytes),
+    ContentType: contentType,
+  }))
+
+  const photo = await prisma.photo.create({
     data: {
-      photoType:  data.photoType,
-      entityType: data.entityType,
-      entityId:   data.entityId,
+      photoType:  photoType as never,
+      entityType,
+      entityId,
       s3Key:      key,
-      caption:    data.caption,
+      caption:    caption || null,
       takenById:  user.id,
     },
   })
 
-  // Return the signed upload URL — browser POSTs the file directly to R2
-  return apiSuccess({ uploadUrl, key })
+  // Phase 4 — fire-and-forget pre-warm of Cloudflare Images variants
+  // so the first viewer doesn't pay the on-demand transform cost.
+  // Cheap (one fetch per variant) and runs on the worker.
+  await enqueue('process-case-photo', { photoId: photo.id })
+
+  return apiSuccess({ key, photoId: photo.id })
 })

@@ -2,9 +2,24 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// Phase 5 — Neon migration.
+//   - `url`        is the *pooled* (Supavisor / pgbouncer) connection
+//                  used by the runtime (Next.js routes, server
+//                  components). Pooled connections share a small
+//                  number of underlying Postgres connections so we
+//                  don't exhaust Neon's per-branch limit at 50+
+//                  concurrent users.
+//   - `directUrl`  is the *unpooled* connection used by `prisma
+//                  migrate` and `prisma db push`. Migrations need a
+//                  real connection because they run DDL (which
+//                  pgbouncer's transaction-pooled mode can't do).
+//
+// Locally `DIRECT_URL` can equal `DATABASE_URL` (no pooler). On Neon
+// you set them to the two URLs Neon's dashboard generates.
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
@@ -26,6 +41,9 @@ enum ScooterStatus {
   SECOND_HAND_AVAILABLE
   SOLD
   WRITTEN_OFF
+  // ── Phase 3 additions ────────────────────────────────────────────────
+  IN_TRANSIT  // scooter is being shipped to/from the warehouse
+  DELIVERED   // confirmed received by customer
 }
 
 enum Grade {
@@ -35,6 +53,7 @@ enum Grade {
 }
 
 enum RepairStatus {
+  // Legacy values (kept for backward compat with existing data)
   RECEIVED
   DIAGNOSING
   AWAITING_PARTS
@@ -43,6 +62,8 @@ enum RepairStatus {
   READY_TO_SHIP
   DISPATCHED
   CANCELLED
+
+  // Existing workflow stages
   AWAITING_INBOUND
   AWAITING_CS
   WAITING_FOR_MECHANIC
@@ -50,6 +71,24 @@ enum RepairStatus {
   QUALITY_CONTROL
   QC_FAILED
   BGRADE_RECORDED
+
+  // ── Phase 3 additions: expanded workflow ────────────────────────────
+  // Pre-arrival (CS owns, customer ships)
+  NEW                  // case just created from customer report
+  CS_TRIAGE            // CS reviewing photos / classifying warranty vs paid
+  QUOTE_SENT           // quote sent to customer for approval
+  AWAITING_PICKUP      // customer label issued, waiting for them to send it
+  IN_TRANSIT           // courier has the scooter
+
+  // Inbound now does diagnosis on arrival
+  INBOUND_DIAGNOSIS    // inbound team confirming reported fault on arrival
+
+  // Recharge loops back to CS
+  CS_RECHARGE          // inbound or mechanic found extra cost; CS re-quoting
+  CUSTOMER_DECLINED    // customer rejected recharge / quote — pending resolution
+
+  // Final delivery confirmation
+  DELIVERED            // customer received the scooter back
 }
 
 enum Priority {
@@ -66,6 +105,8 @@ enum MovementReason {
   MANUAL_ADJUSTMENT
   DAMAGED_WRITTEN_OFF
   STOCK_TAKE_CORRECTION
+  // ── Phase 3 addition ────────────────────────────────────────────────
+  PARTS_REQUEST_AUTO   // auto-created stock movement from PartsRequest
 }
 
 enum ShipmentStatus {
@@ -82,6 +123,24 @@ enum PhotoType {
   SCOOTER_OUTBOUND
   REPAIR_EVIDENCE
   DAMAGE_REPORT
+  // ── Phase 3 addition ────────────────────────────────────────────────
+  CUSTOMER_REPORT      // photo sent by customer when reporting the issue
+}
+
+enum LocationType {
+  INBOUND_AREA
+  WARRANTY_RACK
+  BGRADE_AREA
+  MECHANIC_QUEUE
+  QC_RACK
+  DISPATCH_AREA
+  STORAGE
+  RACK
+}
+
+enum PalletPurpose {
+  BGRADE   // permanent home for b-grade scooters
+  HOLDING  // temporary hold for warranty cases (awaiting parts / delayed)
 }
 
 enum ErrorCode {
@@ -108,6 +167,9 @@ enum PaymentStatus {
   UNPAID
   DISPUTED
   WARRANTY_APPROVED
+  // ── Phase 3 additions ────────────────────────────────────────────────
+  PARTIAL              // customer paid initial quote; recharge pending
+  REFUNDED             // money returned to customer
 }
 
 enum QCResult {
@@ -119,6 +181,29 @@ enum QCResult {
 enum CaseType {
   WARRANTY
   BGRADE
+}
+
+// ── Phase 3: NEW enum for recharge tracking ────────────────────────────────
+enum RechargeOrigin {
+  INBOUND_DIAGNOSIS    // inbound team found scope was bigger than CS quoted
+  MECHANIC_REPAIR      // mechanic mid-repair found additional damage
+}
+
+// ── Phase 3: NEW enum for parts requests ───────────────────────────────────
+enum PartsRequestStatus {
+  REQUESTED            // mechanic flagged need
+  APPROVED             // manager approved order
+  ORDERED              // sent to supplier
+  RECEIVED             // arrived at warehouse
+  CANCELLED
+}
+
+// ── Phase B: customer notification preference ─────────────────────────────
+enum NotificationPreference {
+  EMAIL
+  SMS
+  BOTH
+  NONE
 }
 
 // ─── Models ──────────────────────────────────────────────────────────────────
@@ -145,6 +230,16 @@ model User {
   qcSubmissions        QCSubmission[]      @relation("QCSubmittedBy")
   repairTimeLogs       RepairTimeLog[]     @relation("RepairTimeMechanic")
   invoiceUpdates       InvoiceReference[]  @relation("InvoiceUpdatedBy")
+  palletsCreated       Pallet[]            @relation("PalletCreatedBy")
+  palletItemsAdded     PalletItem[]        @relation("PalletItemAddedBy")
+
+  // ── Phase 3 back-relations ───────────────────────────────────────────
+  notifications        Notification[]      @relation("NotificationRecipient")
+  partsRequestsCreated PartsRequest[]      @relation("PartsRequestRequestedBy")
+  partsRequestsApproved PartsRequest[]     @relation("PartsRequestApprovedBy")
+
+  // ── Mechanic workspace (Phase A) back-relation ───────────────────────
+  caseTasksCompleted   CaseTask[]          @relation("CaseTaskCompletedBy")
 }
 
 model Customer {
@@ -161,6 +256,13 @@ model Customer {
   deletedAt    DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
+
+  // ── Phase B: customer-portal notification preference.
+  //   EMAIL  → only email (default)
+  //   SMS    → only SMS
+  //   BOTH   → both channels
+  //   NONE   → no automated notifications (CS will phone manually)
+  notificationPreference NotificationPreference @default(EMAIL)
 
   repairOrders RepairOrder[]
   scooters     Scooter[]
@@ -183,6 +285,7 @@ model Scooter {
   purchaseCost Decimal?      @db.Decimal(10, 2)
   salePrice    Decimal?      @db.Decimal(10, 2)
   notes        String?
+  totalMileage Int?  // BGRADE: mechanic records mileage
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
@@ -210,6 +313,10 @@ model RepairOrder {
   estimatedCost    Decimal?     @db.Decimal(10, 2)
   finalCost        Decimal?     @db.Decimal(10, 2)
   internalNotes    String?
+  csPaymentNote    String?  // CS records what customer has/hasn't paid
+  customerPrepaid  Boolean  @default(false) // did customer already pay before arrival?
+  warrantyConfirmed Boolean @default(false)  // CS confirms scooter is under warranty
+  source            String?                   // BGRADE only: Currys, Argos, John Lewis, etc.
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
   closedAt         DateTime?
@@ -222,11 +329,40 @@ model RepairOrder {
   qcPassed              Boolean?
   lastQCSubmissionId    String?
 
+  // Barcode & location tracking
+  barcodeAssigned   Boolean            @default(false)
+  currentLocationId String?
+  currentLocation   WarehouseLocation? @relation(fields: [currentLocationId], references: [id])
+  rackLocation      String?            // e.g. INBOUND-R1-L1, QC-R2-L3
+  currentPalletId   String?
+  currentPallet     Pallet?            @relation("PalletCases", fields: [currentPalletId], references: [id])
+
+  // ── Phase 3 additions: recharge tracking ─────────────────────────────
+  // When inbound or mechanic flags scope creep, the case loops back to CS.
+  // These fields preserve the context so CS knows what to re-quote and so
+  // we can return the case to the right stage after CS resolves it.
+  rechargeOrigin       RechargeOrigin?  // who triggered the recharge
+  rechargeReason       String?          // free-text description of what was found
+  rechargeAmount       Decimal?  @db.Decimal(10, 2)  // additional charge amount
+  rechargeRequestedAt  DateTime?        // when the recharge was triggered
+  rechargeResolvedAt   DateTime?        // when CS finished re-quoting
+  customerApprovedAt   DateTime?        // when customer approved the new quote
+  returnToStatus       RepairStatus?    // where to send the case after CS resolves
+
+  // Pre-arrival fields (Phase 3)
+  customerReportedAt   DateTime?        // when customer first reported the issue
+  trackingNumber       String?          // courier tracking for inbound (customer-supplied)
+  expectedArrivalDate  DateTime?        // estimated arrival of the scooter
+  quotedAt             DateTime?        // when initial quote was sent
+  quoteAmount          Decimal?  @db.Decimal(10, 2)
+  quoteApprovedAt      DateTime?
+
   // Existing relations
   repairParts RepairPart[]
   shipments   Shipment[]
 
   // New workflow relations
+  palletItems   PalletItem[]
   statusHistory CaseStatusHistory[]
   comments      CaseComment[]
   qcResults     QCChecklistResult[]
@@ -235,12 +371,24 @@ model RepairOrder {
   repairTimeLog RepairTimeLog?
   invoice       InvoiceReference?
 
+  // ── Phase 3 relations ────────────────────────────────────────────────
+  partsRequests PartsRequest[]
+  notifications Notification[]
+
+  // ── Mechanic workspace (Phase A) relations ───────────────────────────
+  tasks         CaseTask[]
+
+  // ── Phase B: customer-portal notifications (audit trail) ─────────────
+  customerNotifications CustomerNotification[]
+
   @@index([status])
   @@index([customerId])
   @@index([mechanicId])
   @@index([createdAt])
   @@index([orderNumber])
   @@index([caseType])
+  @@index([currentLocationId])
+  @@index([currentPalletId])
 }
 
 model Part {
@@ -251,8 +399,10 @@ model Part {
   description       String?
   stockQty          Int      @default(0)
   reorderLevel      Int      @default(5)
-  warehouseLocation String?
-  unitCost          Decimal? @db.Decimal(10, 2)
+  warehouseLocation  String?   // e.g. PART-S1-R2-C5
+  compatibleModels   String?   // comma-separated model names
+  unitCost           Decimal? @db.Decimal(10, 2)
+  retailPrice        Decimal? @db.Decimal(10, 2)  // ── Phase 3: shown in CS quote builder
   supplierName      String?
   isActive          Boolean  @default(true)
   createdAt         DateTime @default(now())
@@ -260,6 +410,8 @@ model Part {
 
   stockMovements StockMovement[]
   repairParts    RepairPart[]
+  // ── Phase 3 relation
+  partsRequests  PartsRequest[]
 
   @@index([barcode])
   @@index([sku])
@@ -338,7 +490,7 @@ model AuditLog {
   @@index([createdAt])
 }
 
-// ─── New Workflow Models ──────────────────────────────────────────────────────
+// ─── Workflow Models ─────────────────────────────────────────────────────────
 
 model CaseStatusHistory {
   id          String      @id @default(cuid())
@@ -451,3 +603,261 @@ model InvoiceReference {
   @@index([invoiceNumber])
 }
 
+model WarehouseLocation {
+  id          String       @id @default(cuid())
+  name        String
+  code        String       @unique
+  type        LocationType
+  description String?
+  capacity    Int          @default(0)  // max pallets/scooters; 0 = unlimited
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+
+  parentId    String?
+  parent      WarehouseLocation?  @relation("LocationHierarchy", fields: [parentId], references: [id])
+  children    WarehouseLocation[] @relation("LocationHierarchy")
+
+  cases RepairOrder[]
+
+  @@index([type])
+  @@index([isActive])
+  @@index([parentId])
+}
+
+model Pallet {
+  id           String        @id @default(cuid())
+  palletNumber String        @unique  // PLT-20260420-0001
+  purpose      PalletPurpose @default(BGRADE)
+  capacity     Int           @default(10)
+  locationCode String?       // e.g. INBOUND-R1-L1
+  notes        String?
+  isSealed     Boolean       @default(false)  // sealed = no more additions
+  createdById  String
+  createdBy    User          @relation("PalletCreatedBy", fields: [createdById], references: [id])
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  items        PalletItem[]
+  cases        RepairOrder[] @relation("PalletCases")
+
+  @@index([purpose])
+  @@index([isSealed])
+}
+
+model PalletItem {
+  id            String      @id @default(cuid())
+  palletId      String
+  pallet        Pallet      @relation(fields: [palletId], references: [id])
+  repairOrderId String
+  repairOrder   RepairOrder @relation(fields: [repairOrderId], references: [id])
+  addedById     String
+  addedBy       User        @relation("PalletItemAddedBy", fields: [addedById], references: [id])
+  addedAt       DateTime    @default(now())
+  removedAt     DateTime?
+
+  @@unique([palletId, repairOrderId])
+  @@index([palletId])
+  @@index([repairOrderId])
+}
+
+// ─── Phase 3 NEW Models ──────────────────────────────────────────────────────
+
+/// Notification — in-app notification stream.
+/// Created on case events (assigned to you, status changed, customer replied,
+/// SLA breached, parts arrived). Used by the bell icon in the topbar.
+model Notification {
+  id          String      @id @default(cuid())
+  recipientId String
+  recipient   User        @relation("NotificationRecipient", fields: [recipientId], references: [id])
+  caseId      String?
+  case        RepairOrder? @relation(fields: [caseId], references: [id])
+  // Notification type — keep as String for flexibility, no enum needed yet.
+  // Examples: 'CASE_ASSIGNED', 'STATUS_CHANGED', 'CUSTOMER_REPLIED',
+  //           'SLA_WARNING', 'SLA_BREACHED', 'PARTS_ARRIVED', 'RECHARGE_REQUESTED'
+  kind        String
+  title       String
+  body        String?
+  url         String?     // deep-link to related case/page
+  readAt      DateTime?
+  createdAt   DateTime    @default(now())
+
+  @@index([recipientId, readAt])
+  @@index([caseId])
+  @@index([createdAt])
+}
+
+/// PartsRequest — when a mechanic flags AWAITING_PARTS, a request is created
+/// for the warehouse to fulfil. Drives the auto-reorder workflow.
+model PartsRequest {
+  id            String              @id @default(cuid())
+  caseId        String
+  case          RepairOrder         @relation(fields: [caseId], references: [id])
+  partId        String
+  part          Part                @relation(fields: [partId], references: [id])
+  quantity      Int                 @default(1)
+  status        PartsRequestStatus  @default(REQUESTED)
+  requestedById String
+  requestedBy   User                @relation("PartsRequestRequestedBy", fields: [requestedById], references: [id])
+  approvedById  String?
+  approvedBy    User?               @relation("PartsRequestApprovedBy", fields: [approvedById], references: [id])
+  notes         String?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  fulfilledAt   DateTime?
+
+  @@index([caseId])
+  @@index([partId])
+  @@index([status])
+}
+
+// ─── Phase A: Mechanic workspace ─────────────────────────────────────────────
+
+/// RepairGuide — model-specific how-to content the mechanic consults
+/// while working on a job.
+///
+/// Matched to a case via `scooterModel` (substring/case-insensitive
+/// match against `Scooter.model`). The body is markdown rendered on
+/// /repair-guides/[id]. The current dataset is placeholder content;
+/// real guide authoring will land in a future phase.
+model RepairGuide {
+  id           String   @id @default(cuid())
+  scooterModel String   // matches Scooter.model, e.g. "Pure Air Pro"
+  brand        String?  // optional, narrows the match
+  title        String   // e.g. "Replace front brake pads"
+  body         String   // markdown
+  category     String?  // e.g. "brakes", "battery", "wheel", "controller"
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([scooterModel])
+  @@index([brand])
+  @@index([category])
+}
+
+/// CaseTask — an item on a mechanic's repair checklist for a case.
+/// Created, reordered, and ticked off by the assigned mechanic in /workshop/job/[id].
+///
+/// Phase A v2: tasks are no longer surfaced in the mechanic UI — they
+/// were replaced by the RepairGuide picker. The table is kept (rather
+/// than dropped) to preserve historical records on existing cases. The
+/// task CRUD endpoints still work for any external caller.
+model CaseTask {
+  id            String      @id @default(cuid())
+  caseId        String
+  case          RepairOrder @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  order         Int
+  title         String
+  notes         String?
+  completedAt   DateTime?
+  completedById String?
+  completedBy   User?       @relation("CaseTaskCompletedBy", fields: [completedById], references: [id])
+  isRequired    Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+
+  @@index([caseId, order])
+}
+
+// ─── Phase B: Customer self-service portal ───────────────────────────────────
+
+/// CustomerNotification — outbound email / SMS sent to the customer
+/// when their repair status changes (or when CS manually shares a
+/// tracking link).
+///
+/// We store every notification (queued, sent, failed) for audit + so
+/// CS can see what the customer received without a separate provider
+/// dashboard. The `triggerEvent` field is a string rather than an
+/// enum so we can add new trigger names without a schema migration.
+///
+/// Channel and status are also strings (matching the existing
+/// `Notification.kind` pattern) — they're tightly enumerated in
+/// application code: see lib/notifications.ts.
+model CustomerNotification {
+  id           String      @id @default(cuid())
+  caseId       String
+  case         RepairOrder @relation(fields: [caseId], references: [id])
+  channel      String      // 'EMAIL' | 'SMS'
+  recipient    String      // email address or phone number, captured at send time
+  status       String      // 'QUEUED' | 'SENT' | 'FAILED'
+  subject      String?     // email subject (null for SMS)
+  body         String      // plain text or HTML — channel-dependent
+  triggerEvent String      // e.g. 'STATUS_CHANGE_DISPATCHED', 'MANUAL_LINK_SHARE'
+  sentAt       DateTime?
+  errorMessage String?
+  createdAt    DateTime    @default(now())
+
+  @@index([caseId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ─── Audit log + transactional outbox foundation ────────────────────────────
+//
+// These two tables underpin the project's "build it once, build it right"
+// audit + side-effect dispatch story. See:
+//   - docs/adr/0001-audit-log-and-outbox.md  (rationale, trade-offs)
+//   - docs/runbook/outbox.md                  (operational playbook)
+//   - src/lib/audit-outbox.ts                 (the ONLY sanctioned writer)
+//
+// Naming convention (per spec): SQL is snake_case (`audit_log`,
+// `outbox_event`, `occurred_at`, …) for psql-friendly queries; Prisma
+// model + field names stay PascalCase / camelCase for callsite
+// consistency with the rest of the schema. The Prisma model name
+// AuditEntry is deliberately distinct from the legacy `AuditLog`
+// model above so both tables coexist during transition.
+//
+// Hard rules enforced in code (see src/lib/audit-outbox.ts):
+//   - Both tables are append-only.
+//   - The single exception is OutboxEvent.processedAt, set only by
+//     src/trigger/dispatch-outbox.ts.
+//   - All writes go through `withAuditedTransaction()`. Direct
+//     prisma.auditEntry / prisma.outboxEvent writes from anywhere
+//     else are blocked at runtime via a Prisma extension.
+
+/// AuditEntry — append-only audit trail of every business mutation.
+/// PII fields in `before` / `after` snapshots are redacted to
+/// `{ __pii: true, hash, len }` by the helper before insert.
+model AuditEntry {
+  id            String   @id @default(uuid())                @map("id")
+  occurredAt    DateTime @default(now()) @db.Timestamptz(6)  @map("occurred_at")
+  actorUserId   String?                                       @map("actor_user_id") // null = system event
+  actorRole     String                                        @map("actor_role")
+  entityType    String                                        @map("entity_type")   // lowercase singular: "case", "user", …
+  entityId      String                                        @map("entity_id")
+  action        String                                                              // CREATE | UPDATE | DELETE | STATUS_CHANGE | READ_SENSITIVE
+  before        Json?
+  after         Json?
+  diff          Json?
+  reason        String?
+  requestId     String                                        @map("request_id")    // correlation id (matches the response header)
+  ipAddress     String?                                       @map("ip_address")
+  userAgent     String?                                       @map("user_agent")
+
+  @@index([entityType, entityId, occurredAt(sort: Desc)],     map: "audit_log_entity_occurred_idx")
+  @@index([actorUserId, occurredAt(sort: Desc)],              map: "audit_log_actor_occurred_idx")
+  @@index([occurredAt(sort: Desc)],                           map: "audit_log_occurred_idx")
+  @@map("audit_log")
+}
+
+/// OutboxEvent — transactional outbox drained by
+/// src/trigger/dispatch-outbox.ts. Inserted in the same transaction
+/// as the business mutation it describes, so side effects (Pusher
+/// broadcasts, queued notifications, cache invalidation) cannot
+/// silently desync from the database.
+model OutboxEvent {
+  id              String    @id @default(uuid())                  @map("id")
+  aggregateType   String                                            @map("aggregate_type")    // e.g. "case", "stock", "photo"
+  aggregateId     String                                            @map("aggregate_id")
+  eventType       String                                            @map("event_type")        // e.g. "case.status_changed"
+  payload         Json
+  createdAt       DateTime  @default(now()) @db.Timestamptz(6)     @map("created_at")
+  availableAt     DateTime  @default(now()) @db.Timestamptz(6)     @map("available_at")      // for backoff
+  processedAt     DateTime?                @db.Timestamptz(6)      @map("processed_at")
+  attempts        Int       @default(0)
+  maxAttempts     Int       @default(10)                            @map("max_attempts")
+  lastError       String?                                           @map("last_error")
+  idempotencyKey  String    @unique                                 @map("idempotency_key")
+
+  @@index([processedAt, availableAt],                              map: "outbox_event_dispatch_idx")
+  @@index([aggregateType, aggregateId],                            map: "outbox_event_aggregate_idx")
+  @@map("outbox_event")
+}
