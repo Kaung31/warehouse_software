@@ -124,4 +124,4 @@ npx prisma generate          # regenerate the Prisma client (auto on install)
   — never call `notifyStatusChange()` directly from a route.
 
 See `docs/architecture.md` for the bigger picture and
-`docs/runbook.md` for "what to do when X breaks".
+`docs/runbook/index.md` for "what to do when X breaks".

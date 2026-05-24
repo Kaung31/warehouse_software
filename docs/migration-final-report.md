@@ -148,7 +148,7 @@ over unchanged.
 6. **Last resort** — Cloudflare DNS → swap DNS to the still-running
    Vercel deployment (which we keep live for 7 days post-cutover).
 
-Detailed playbook in `docs/runbook.md`.
+Detailed playbook in `docs/runbook/index.md`.
 
 ## Files added
 
