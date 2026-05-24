@@ -49,3 +49,6 @@ next-env.d.ts
 
 # Local Claude Code workspace state — not for the shared repo
 .claude/
+
+# keep the env template (no secrets in it)
+!.env.example
